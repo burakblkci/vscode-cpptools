@@ -3,8 +3,8 @@
  * See 'LICENSE' in the project root for license information.
  * ------------------------------------------------------------------------------------------ */
 import * as vscode from 'vscode';
-import { DefaultClient, FormatParams, FormatDocumentRequest, FormatResult } from '../client';
-import { CppSettings, getEditorConfigSettings, OtherSettings } from '../settings';
+import { DefaultClient, FormatDocumentRequest, FormatParams, FormatResult } from '../client';
+import { CppSettings, OtherSettings, getEditorConfigSettings } from '../settings';
 import { makeVscodeTextEdits } from '../utils';
 
 export class DocumentFormattingEditProvider implements vscode.DocumentFormattingEditProvider {
@@ -18,13 +18,14 @@ export class DocumentFormattingEditProvider implements vscode.DocumentFormatting
         if (settings.formattingEngine === "disabled") {
             return [];
         }
-        await this.client.awaitUntilLanguageClientReady();
+        await this.client.ready;
         const filePath: string = document.uri.fsPath;
-        const onChanges: string | number | boolean = options.onChanges;
-        if (onChanges) {
+        if (options.onChanges) {
             let insertSpacesSet: boolean = false;
             let tabSizeSet: boolean = false;
-            const editor: vscode.TextEditor = await vscode.window.showTextDocument(document, undefined, true);
+            // Even when preserveFocus is true, VS Code is making the document active (when we don't want that).
+            // The workaround is for the code invoking the formatting to call showTextDocument again afterwards on the previously active document.
+            const editor: vscode.TextEditor = await vscode.window.showTextDocument(document, { preserveFocus: options.preserveFocus as boolean });
             if (editor.options.insertSpaces && typeof editor.options.insertSpaces === "boolean") {
                 options.insertSpaces = editor.options.insertSpaces;
                 insertSpacesSet = true;
@@ -63,7 +64,7 @@ export class DocumentFormattingEditProvider implements vscode.DocumentFormatting
                         line: 0
                     }
                 },
-                onChanges: onChanges === true
+                onChanges: options.onChanges === true
             };
             // We do not currently pass the CancellationToken to sendRequest
             // because there is not currently cancellation logic for formatting

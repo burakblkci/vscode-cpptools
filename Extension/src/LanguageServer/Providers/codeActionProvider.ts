@@ -3,13 +3,18 @@
  * See 'LICENSE' in the project root for license information.
  * ------------------------------------------------------------------------------------------ */
 import * as vscode from 'vscode';
-import {  Position, Range, RequestType, TextEdit } from 'vscode-languageclient';
+import { Position, Range, RequestType, TextEdit } from 'vscode-languageclient';
+import * as nls from 'vscode-nls';
 import { DefaultClient } from '../client';
-import { CodeActionCodeInfo, CodeActionDiagnosticInfo, codeAnalysisFileToCodeActions, codeAnalysisCodeToFixes,
-    codeAnalysisAllFixes } from '../codeAnalysis';
-import { makeVscodeRange } from '../utils';
+import {
+    CodeActionCodeInfo, CodeActionDiagnosticInfo, codeAnalysisAllFixes, codeAnalysisCodeToFixes, codeAnalysisFileToCodeActions
+} from '../codeAnalysis';
+import { LocalizeStringParams, getLocalizedString } from '../localization';
 import { CppSettings } from '../settings';
-import { getLocalizedString, LocalizeStringParams } from '../localization';
+import { makeVscodeRange } from '../utils';
+
+nls.config({ messageFormat: nls.MessageFormat.bundle, bundleFormat: nls.BundleFormat.standalone })();
+const localize: nls.LocalizeFunc = nls.loadMessageBundle();
 
 interface GetCodeActionsRequestParams {
     uri: string;
@@ -22,6 +27,8 @@ interface CodeActionCommand {
     arguments?: any[];
     edit?: TextEdit;
     uri?: string;
+    range?: Range;
+    disabledReason?: string;
 }
 
 interface GetCodeActionsResult {
@@ -37,9 +44,13 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
         this.client = client;
     }
 
+    private static inlineMacroKind: vscode.CodeActionKind = vscode.CodeActionKind.RefactorInline.append("macro");
+    private static extractToFunctionKind: vscode.CodeActionKind = vscode.CodeActionKind.RefactorExtract.append("function");
+    private static expandSelectionKind: vscode.CodeActionKind = CodeActionProvider.extractToFunctionKind.append("expandSelection");
+
     public async provideCodeActions(document: vscode.TextDocument, range: vscode.Range | vscode.Selection,
         context: vscode.CodeActionContext, token: vscode.CancellationToken): Promise<(vscode.Command | vscode.CodeAction)[]> {
-        await this.client.awaitUntilLanguageClientReady();
+        await this.client.ready;
         let r: Range;
         if (range instanceof vscode.Selection) {
             if (range.active.isBefore(range.anchor)) {
@@ -59,7 +70,7 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
             uri: document.uri.toString()
         };
 
-        const response: GetCodeActionsResult = await this.client.languageClient.sendRequest(
+        let response: GetCodeActionsResult = await this.client.languageClient.sendRequest(
             GetCodeActionsRequest, params, token);
 
         const resultCodeActions: vscode.CodeAction[] = [];
@@ -79,15 +90,22 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
             !!this.client.configuration.CurrentConfiguration?.configurationProviderInCppPropertiesJson;
 
         // Convert to vscode.CodeAction array
-        response.commands.forEach((command) => {
+        let hasInlineMacro: boolean = false;
+        const processCommand = (command: CodeActionCommand) => {
             let title: string = getLocalizedString(command.localizeStringParams);
             let wsEdit: vscode.WorkspaceEdit | undefined;
             let codeActionKind: vscode.CodeActionKind = vscode.CodeActionKind.QuickFix;
             if (command.edit) {
-                // Inline macro feature.
-                codeActionKind = vscode.CodeActionKind.RefactorInline;
                 wsEdit = new vscode.WorkspaceEdit();
+                if (command.command === 'C_Cpp.AddMissingInclude') {
+                    command.edit.newText += "\n";
+                }
                 wsEdit.replace(document.uri, makeVscodeRange(command.edit.range), command.edit.newText);
+                if (command.command === "edit") {
+                    // Inline macro feature.
+                    codeActionKind = CodeActionProvider.inlineMacroKind;
+                    hasInlineMacro = true;
+                }
             } else if (command.command === "C_Cpp.RemoveAllCodeAnalysisProblems" && command.uri !== undefined) {
                 // The "RemoveAll" message is sent for all code analysis squiggles.
                 const vsCodeRange: vscode.Range = makeVscodeRange(r);
@@ -118,7 +136,7 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
                         if (codeActionCodeInfo !== undefined) {
                             if (codeActionCodeInfo.fixAllTypeCodeAction !== undefined &&
                                 (codeActionCodeInfo.uriToInfo.size > 1 ||
-                                codeActionCodeInfo.uriToInfo.values().next().value.numValidWorkspaceEdits > 1)) {
+                                    codeActionCodeInfo.uriToInfo.values().next().value.numValidWorkspaceEdits > 1)) {
                                 // Only show the "fix all type" if there is more than one fix for the type.
                                 fixCodeActions.push(codeActionCodeInfo.fixAllTypeCodeAction);
                             }
@@ -135,7 +153,7 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
                         if (codeActionCodeInfo.removeAllTypeCodeAction !== undefined &&
                             codeActionCodeInfo.uriToInfo.size > 0 &&
                             (codeActionCodeInfo.uriToInfo.size > 1 ||
-                            codeActionCodeInfo.uriToInfo.values().next().value.identifiers.length > 1)) {
+                                codeActionCodeInfo.uriToInfo.values().next().value.identifiers.length > 1)) {
                             // Only show the "clear all type" if there is more than one fix for the type.
                             removeAllTypeAvailable = true;
                         }
@@ -166,7 +184,7 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
                 }
                 if (showClear !== "None") {
                     let showClearAllAvailable: boolean = false;
-                    if ((codeActionDiagnosticInfo.length > 1 || codeAnalysisFileToCodeActions.size > 1)) {
+                    if (codeActionDiagnosticInfo.length > 1 || codeAnalysisFileToCodeActions.size > 1) {
                         showClearAllAvailable = true;
                     }
                     if (!showClearAllAvailable || showClear !== "AllOnly") {
@@ -179,8 +197,10 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
                 resultCodeActions.push(...disableCodeActions);
                 resultCodeActions.push(...docCodeActions);
                 return;
-            } else if (command.command === 'C_Cpp.CreateDeclarationOrDefinition' && (command.arguments ?? []).length === 0) {
-                command.arguments = ['codeAction']; // We report the sender of the command
+            } else if ((command.command === 'C_Cpp.CreateDeclarationOrDefinition' || command.command === 'C_Cpp.CopyDeclarationOrDefinition')
+                && (command.arguments ?? []).length === 0 && command.range !== undefined) {
+                command.arguments = [];
+                command.arguments.push({ sender: 'codeAction', range: command.range });
             } else if (command.command === "C_Cpp.SelectIntelliSenseConfiguration") {
                 command.arguments = ['codeAction'];
                 hasSelectIntelliSenseConfiguration = true;
@@ -193,6 +213,14 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
                 } else {
                     return;
                 }
+            } else if (command.command === "C_Cpp.ExtractToFunction" ||
+                command.command === "C_Cpp.ExtractToMemberFunction") {
+                codeActionKind = CodeActionProvider.extractToFunctionKind;
+            } else if (command.command === "C_Cpp.ExtractToFreeFunction") {
+                // TODO: https://github.com/microsoft/vscode-cpptools/issues/11473 needs to be fixed.
+                return;
+            } else if (command.command === "C_Cpp.ExpandSelection") {
+                codeActionKind = CodeActionProvider.expandSelectionKind;
             }
             const vscodeCodeAction: vscode.CodeAction = {
                 title: title,
@@ -202,10 +230,51 @@ export class CodeActionProvider implements vscode.CodeActionProvider {
                     arguments: command.arguments
                 },
                 edit: wsEdit,
-                kind: codeActionKind
+                kind: codeActionKind,
+                disabled: command.disabledReason ? { reason: command.disabledReason } : undefined
             };
             resultCodeActions.push(vscodeCodeAction);
-        });
+        };
+
+        response.commands.forEach(processCommand);
+
+        // If the refactor.inline.macro code action is specifically invoked by the user,
+        // then force a hover to ensure that the "Expands to" info is available.
+        if (!hasInlineMacro && context.only?.value === "refactor.inline.macro") {
+            const processInlineMacro = async (): Promise<boolean> => {
+                const editor: vscode.TextEditor | undefined = vscode.window.activeTextEditor;
+                if (!editor) {
+                    return false;
+                }
+                const result: vscode.Hover[] = (await vscode.commands.executeCommand('vscode.executeHoverProvider', document.uri, range.start)) as vscode.Hover[];
+                if (result.length === 0) {
+                    return false;
+                }
+                const hoverResult: vscode.MarkdownString = result[0].contents[0] as vscode.MarkdownString;
+                if (!hoverResult.value.includes(localize("expands.to", "Expands to:"))) {
+                    return false;
+                }
+                response = await this.client.languageClient.sendRequest(GetCodeActionsRequest, params, token);
+                if (token.isCancellationRequested || response.commands === undefined) {
+                    return false;
+                }
+                for (const command of response.commands) {
+                    if (command.edit) {
+                        processCommand(command);
+                        return true;
+                    }
+                }
+                return false;
+            };
+            if (!await processInlineMacro()) {
+                const disabledCodeAction: vscode.CodeAction = {
+                    title: localize({ key: "inline.macro", comment: ["'Inline' is a command and not an adjective, i.e. like 'Expand macro'."] }, "Inline macro"),
+                    kind: CodeActionProvider.inlineMacroKind,
+                    disabled: { reason: localize("inline.macro.not.available", "Inline macro is not available at this location.") }
+                };
+                resultCodeActions.push(disabledCodeAction);
+            }
+        }
         return resultCodeActions;
     }
 }

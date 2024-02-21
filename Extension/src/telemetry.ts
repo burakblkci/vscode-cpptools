@@ -6,8 +6,10 @@
 
 import TelemetryReporter from '@vscode/extension-telemetry';
 import { getExperimentationServiceAsync, IExperimentationService, IExperimentationTelemetry, TargetPopulation } from 'vscode-tas-client';
-import { CppSettings } from './LanguageServer/settings';
 import * as util from './common';
+import { CppSettings } from './LanguageServer/settings';
+import { logAndReturn } from './Utility/Async/returns';
+import { is } from './Utility/System/guards';
 
 interface IPackageInfo {
     name: string;
@@ -77,16 +79,7 @@ export function getExperimentationService(): Promise<IExperimentationService> | 
     return initializationPromise;
 }
 
-export async function showLanguageStatusExperiment(): Promise<boolean> {
-    return isExperimentEnabled("ShowLangStatBar");
-}
-
-export async function showStatusBarIntelliSenseButton(): Promise<boolean> {
-    const result: boolean = await isExperimentEnabled("showStatusBarIntelliSenseIndicator");
-    return result;
-}
-
-async function isExperimentEnabled(experimentName: string): Promise<boolean> {
+export async function isExperimentEnabled(experimentName: string): Promise<boolean> {
     if (new CppSettings().experimentalFeatures) {
         return true;
     }
@@ -96,19 +89,11 @@ async function isExperimentEnabled(experimentName: string): Promise<boolean> {
 }
 
 export async function deactivate(): Promise<void> {
-    if (initializationPromise) {
-        try {
-            await initializationPromise;
-        } catch (e) {
-            // Continue even if we were not able to initialize the experimentation platform.
-        }
-    }
-    if (experimentationTelemetry) {
-        experimentationTelemetry.dispose();
-    }
+    await initializationPromise?.catch(logAndReturn.undefined);
+    await experimentationTelemetry?.dispose().catch(logAndReturn.undefined);
 }
 
-export function logDebuggerEvent(eventName: string, properties?: { [key: string]: string }, metrics?: { [key: string]: number }): void {
+export function logDebuggerEvent(eventName: string, properties?: Record<string, string>, metrics?: Record<string, number>): void {
     const sendTelemetry = () => {
         if (experimentationTelemetry) {
             const eventNamePrefix: string = "cppdbg/VS/Diagnostics/Debugger/";
@@ -116,19 +101,15 @@ export function logDebuggerEvent(eventName: string, properties?: { [key: string]
         }
     };
 
-    if (initializationPromise) {
-        try {
-            // Use 'then' instead of 'await' because telemetry should be "fire and forget".
-            initializationPromise.then(sendTelemetry);
-            return;
-        } catch (e) {
-            // Continue even if we were not able to initialize the experimentation platform.
-        }
+    // simpler expression of the original:
+    // Uses 'then' instead of 'await' because telemetry should be "fire and forget".
+    if (is.promise(initializationPromise)) {
+        return void initializationPromise.catch(logAndReturn.undefined).then(sendTelemetry).catch(logAndReturn.undefined);
     }
     sendTelemetry();
 }
 
-export function logLanguageServerEvent(eventName: string, properties?: { [key: string]: string }, metrics?: { [key: string]: number }): void {
+export function logLanguageServerEvent(eventName: string, properties?: Record<string, string>, metrics?: Record<string, number>): void {
     const sendTelemetry = () => {
         if (experimentationTelemetry) {
             const eventNamePrefix: string = "C_Cpp/LanguageServer/";
@@ -136,14 +117,8 @@ export function logLanguageServerEvent(eventName: string, properties?: { [key: s
         }
     };
 
-    if (initializationPromise) {
-        try {
-            // Use 'then' instead of 'await' because telemetry should be "fire and forget".
-            initializationPromise.then(sendTelemetry);
-            return;
-        } catch (e) {
-            // Continue even if we were not able to initialize the experimentation platform.
-        }
+    if (is.promise(initializationPromise)) {
+        return void initializationPromise.catch(logAndReturn.undefined).then(sendTelemetry).catch(logAndReturn.undefined);
     }
     sendTelemetry();
 }
